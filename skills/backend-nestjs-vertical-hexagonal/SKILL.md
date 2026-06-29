@@ -39,7 +39,7 @@ module.exports = {
 
 ## 2. Directory Layout (Monolith Spec)
 
-Features reside under `src/modules/`. Cross-cutting domain concerns (like base DDD classes or shared value objects) reside in `src/shared/`.
+Features reside under `src/modules/`. Cross-cutting domain concerns (like base DDD classes, shared exceptions or shared value objects) reside in `src/shared/`.
 
 ```text
 src/
@@ -51,6 +51,8 @@ src/
 │   │   │   ├── Entity.ts
 │   │   │   ├── AggregateRoot.ts
 │   │   │   └── ValueObject.ts
+│   │   ├── exceptions/
+│   │   │   └── DomainError.ts          # Base Domain Error class
 │   │   └── value-objects/
 │   │       └── Email.ts                # Reusable Value Object
 │   └── infrastructure/
@@ -65,7 +67,7 @@ src/
         │   ├── value-objects/
         │   │   └── OrderId.ts
         │   ├── exceptions/
-        │   │   └── OrderErrors.ts
+        │   │   └── OrderErrors.ts      # Feature-specific Domain Errors
         │   └── ports/
         │       ├── OrderRepository.ts  # Repository interface (Port)
         │       └── tokens.ts           # DI Tokens (Symbol)
@@ -92,9 +94,9 @@ src/
 
 ---
 
-## 3. DDD Base Primitives
+## 3. DDD Base Primitives & Shared Errors
 
-Define base classes in `src/shared/domain/building-blocks/` to avoid boilerplate and enforce consistency.
+Define base classes in `src/shared/domain/building-blocks/` and base exceptions in `src/shared/domain/exceptions/`.
 
 ### A. Value Object Base Class
 ```typescript
@@ -156,16 +158,47 @@ export abstract class AggregateRoot<T> extends Entity<T> {
 }
 ```
 
+### D. Base Domain Exception
+`src/shared/domain/exceptions/DomainError.ts`
+```typescript
+export abstract class DomainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = this.constructor.name;
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+```
+
 ---
 
 ## 4. Rich Domain & Persistence Decoupling (Mappers)
 
 ORM decorators (Prisma schemas, TypeORM annotations) are infrastructure details. They must not enter the `domain` or `application` layers. Use a **Mapper** to translate.
 
-### A. Domain Entity (Rich & Clean)
+### A. Feature Domain Errors
+`src/modules/orders/domain/exceptions/OrderErrors.ts`
+```typescript
+import { DomainError } from '../../../../shared/domain/exceptions/DomainError';
+
+export class OrderNotFoundError extends DomainError {
+  constructor(orderId: string) {
+    super(`Order with ID ${orderId} was not found`);
+  }
+}
+
+export class InvalidOrderPriceError extends DomainError {
+  constructor(price: number) {
+    super(`Price ${price} is invalid, must be positive`);
+  }
+}
+```
+
+### B. Domain Entity (Rich & Clean)
 `src/modules/orders/domain/entities/Order.ts`
 ```typescript
 import { AggregateRoot } from '../../../../shared/domain/building-blocks/AggregateRoot';
+import { InvalidOrderPriceError } from '../exceptions/OrderErrors';
 
 interface OrderProps {
   customerId: string;
@@ -176,7 +209,7 @@ interface OrderProps {
 export class Order extends AggregateRoot<OrderProps> {
   constructor(props: OrderProps, id?: string) {
     if (props.price < 0) {
-      throw new Error('Price cannot be negative');
+      throw new InvalidOrderPriceError(props.price);
     }
     super(props, id);
   }
@@ -192,7 +225,7 @@ export class Order extends AggregateRoot<OrderProps> {
 }
 ```
 
-### B. Infrastructure Mapper
+### C. Infrastructure Mapper
 `src/modules/orders/infrastructure/adapters/mappers/OrderMapper.ts`
 ```typescript
 import { Order as PrismaOrder } from '@prisma/client';
@@ -280,28 +313,38 @@ export class OrdersModule {}
 
 ## 6. Presentation Exception Mapping
 
-To prevent leaking raw database errors or framework-specific messages to consumers, catch domain errors and map them to appropriate HTTP/gRPC statuses using NestJS Exception Filters in `presentation/filters/`.
+To prevent leaking raw database errors or framework-specific messages, catch domain errors and map them to appropriate HTTP/gRPC statuses using NestJS Exception Filters in `presentation/filters/`.
+
+Avoid checking exception message strings (`exception.message.includes('not found')`) as it is fragile and breaks silently when messages change. Instead, catch `DomainError` classes specifically and map error constructors using a TypeScript `Map`.
 
 ### A. Exception Filter
 `src/modules/orders/presentation/filters/OrderExceptionFilter.ts`
 ```typescript
 import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus } from '@nestjs/common';
 import { Response } from 'express';
+import { DomainError } from '../../../../shared/domain/exceptions/DomainError';
+import { OrderNotFoundError, InvalidOrderPriceError } from '../../domain/exceptions/OrderErrors';
 
-@Catch(Error)
+type DomainErrorConstructor = new (...args: any[]) => DomainError;
+
+// Map domain error classes directly to HTTP Status Codes
+const ERROR_STATUS_MAP = new Map<DomainErrorConstructor, HttpStatus>([
+  [OrderNotFoundError, HttpStatus.NOT_FOUND],
+  [InvalidOrderPriceError, HttpStatus.BAD_REQUEST],
+]);
+
+@Catch(DomainError) // Catch only domain errors, leaving systemic exceptions (like HTTP 500s) to global filters
 export class OrderExceptionFilter implements ExceptionFilter {
-  catch(exception: Error, host: ArgumentsHost) {
+  catch(exception: DomainError, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
 
-    // Map specific business validation/logic errors to corresponding HTTP Status Codes
-    let status = HttpStatus.BAD_REQUEST;
-    if (exception.message.includes('not found')) {
-      status = HttpStatus.NOT_FOUND;
-    }
+    const errorClass = exception.constructor as DomainErrorConstructor;
+    const status = ERROR_STATUS_MAP.get(errorClass) ?? HttpStatus.BAD_REQUEST;
 
     response.status(status).json({
       statusCode: status,
+      error: exception.name,
       message: exception.message,
       timestamp: new Date().toISOString(),
     });
