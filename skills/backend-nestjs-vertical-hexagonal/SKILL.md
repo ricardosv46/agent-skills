@@ -5,26 +5,42 @@ description: Enforces a Vertical Slice / Feature-First architecture with an inte
 
 # Enterprise NestJS Vertical-Hexagonal & DDD Guideline
 
-This guideline defines the industry-standard implementation of **Hexagonal Architecture**, **Vertical Slicing (Feature-First)**, and **Domain-Driven Design (DDD)** in enterprise NestJS projects, matching patterns used by tech leaders.
+This skill defines the implementation of **Hexagonal Architecture**, **Vertical Slicing (Feature-First)**, and **Domain-Driven Design (DDD)** in enterprise NestJS projects, validated via `eslint-plugin-hexagonal-architecture`.
 
 ---
 
-## 1. Core Architectural Pillars
+## 1. Core Architectural Pillars & ESLint Boundaries
 
 1.  **Screaming Architecture**: Folder structures scream the domain features (e.g., `orders`, `inventory`, `billing`) instead of technical frameworks.
 2.  **Pure Domain (Core)**: The inner circle (`domain/` and `application/`) is written in pure TypeScript. It has **zero dependencies** on NestJS (`@nestjs/common`), database tools (Prisma, TypeORM, mongoose), or any external framework.
 3.  **Strict Dependency Direction**: Outer layers import from inner layers. Inner layers only import from themselves or the `shared/` kernel.
-    *   `Presentation -> Application -> Domain`
-    *   `Infrastructure -> Application -> Domain`
-4.  **No Anemic Domains**: Entities must protect their business rules (invariants) through encapsulated properties, self-validations, and Value Objects.
-5.  **Persistence Decoupling (Mappers)**: Database entities are mapped to/from pure domain models. ORM schemas (Prisma types, TypeORM decorators) never enter the Domain layer.
+4.  **Mandatory ESLint Rule Boundaries**: The project must install and configure `eslint-plugin-hexagonal-architecture`.
+    *   **Domain (`domain/`)**: Can only import from within the same `domain/` folder or shared domain utilities. It has no external dependencies.
+    *   **Application (`application/`)**: Can only import from `domain/` and other `application/` cases. It cannot import from `infrastructure/` or presentation.
+    *   **Infrastructure (`infrastructure/`)**: Can import from `domain/`, `application/`, and other `infrastructure/` files.
+    *   **Presentation (`presentation/`)**: The controller/routing layer resides outside the inner circle, allowing controllers to import from `application/` and `domain/` without triggering ESLint errors.
+
+### ESLint Configuration (`.eslintrc.js` or equivalent)
+```javascript
+module.exports = {
+  plugins: ["hexagonal-architecture"],
+  overrides: [
+    {
+      files: ["src/modules/**/*.ts"],
+      rules: {
+        "hexagonal-architecture/enforce": ["error"]
+      }
+    }
+  ]
+};
+```
 
 ---
 
-## 2. Directory Layouts (Monolith vs. Microservice)
+## 2. Directory Layout (Monolith Spec)
 
-### A. Monolithic Structure
-Features reside under `src/modules/`. Cross-cutting domain concerns (like a base `Entity` class or shared `Email` value object) reside in `src/shared/`.
+Features reside under `src/modules/`. Cross-cutting domain concerns (like base DDD classes or shared value objects) reside in `src/shared/`.
+
 ```text
 src/
 ├── main.ts
@@ -36,7 +52,7 @@ src/
 │   │   │   ├── AggregateRoot.ts
 │   │   │   └── ValueObject.ts
 │   │   └── value-objects/
-│   │       └── Email.ts
+│   │       └── Email.ts                # Reusable Value Object
 │   └── infrastructure/
 │       └── prisma/
 │           └── prisma.service.ts
@@ -51,47 +67,36 @@ src/
         │   ├── exceptions/
         │   │   └── OrderErrors.ts
         │   └── ports/
-        │       └── OrderRepository.ts  # Repository interface (Port)
+        │       ├── OrderRepository.ts  # Repository interface (Port)
+        │       └── tokens.ts           # DI Tokens (Symbol)
         ├── application/
         │   ├── dtos/
         │   │   └── CreateOrderInput.ts
         │   └── use-cases/
         │       └── CreateOrderUseCase.ts
         ├── infrastructure/
-        │   ├── persistence/
-        │   │   ├── PrismaOrderRepository.ts # Adapter implementation
-        │   │   └── OrderMapper.ts       # Domain <-> DB entity translator
+        │   ├── adapters/
+        │   │   ├── repository/
+        │   │   │   └── PrismaOrderRepository.ts # Adapter implementation
+        │   │   └── mappers/
+        │   │       └── OrderMapper.ts       # Domain <-> DB mapper
         │   └── config/
         └── presentation/
             ├── controllers/
-            │   └── OrderController.ts   # HTTP or gRPC Controller
+            │   └── OrderController.ts   # HTTP Controller
+            ├── filters/
+            │   └── OrderExceptionFilter.ts # Maps domain errors to HTTP
             └── dtos/
                 └── CreateOrderDto.ts   # class-validator schemas
 ```
 
-### B. Microservice Structure
-In a microservice, the entire repository is dedicated to a single Bounded Context. Features are sliced vertically, but there is no `modules/` nesting layer:
-```text
-src/
-├── main.ts
-├── app.module.ts
-├── shared/                             # Shared Kernel (base DDD and utils)
-└── auth/                               # Vertical module directory
-    ├── auth.module.ts
-    ├── domain/
-    ├── application/
-    ├── infrastructure/
-    └── presentation/
-```
-
 ---
 
-## 3. DDD Base Primitives (Enterprise Style)
+## 3. DDD Base Primitives
 
 Define base classes in `src/shared/domain/building-blocks/` to avoid boilerplate and enforce consistency.
 
 ### A. Value Object Base Class
-`src/shared/domain/building-blocks/ValueObject.ts`
 ```typescript
 export abstract class ValueObject<T> {
   protected readonly props: T;
@@ -108,7 +113,6 @@ export abstract class ValueObject<T> {
 ```
 
 ### B. Entity Base Class
-`src/shared/domain/building-blocks/Entity.ts`
 ```typescript
 export abstract class Entity<T> {
   protected readonly _id: string;
@@ -132,18 +136,17 @@ export abstract class Entity<T> {
 ```
 
 ### C. Aggregate Root & Domain Events
-`src/shared/domain/building-blocks/AggregateRoot.ts`
 ```typescript
 import { Entity } from './Entity';
 
 export abstract class AggregateRoot<T> extends Entity<T> {
-  private _domainEvents: any[] = [];
+  private _domainEvents: unknown[] = [];
 
-  get domainEvents(): any[] {
+  get domainEvents(): unknown[] {
     return this._domainEvents;
   }
 
-  protected addDomainEvent(event: any): void {
+  protected addDomainEvent(event: unknown): void {
     this._domainEvents.push(event);
   }
 
@@ -155,15 +158,14 @@ export abstract class AggregateRoot<T> extends Entity<T> {
 
 ---
 
-## 4. Decoupling Base Model and Persistence (Mappers)
+## 4. Rich Domain & Persistence Decoupling (Mappers)
 
-Do not leak ORM annotations or database schemas into your domain. The Domain Entity represents pure business rules, while the DB Adapter uses a **Mapper** to translate.
+ORM decorators (Prisma schemas, TypeORM annotations) are infrastructure details. They must not enter the `domain` or `application` layers. Use a **Mapper** to translate.
 
 ### A. Domain Entity (Rich & Clean)
 `src/modules/orders/domain/entities/Order.ts`
 ```typescript
 import { AggregateRoot } from '../../../../shared/domain/building-blocks/AggregateRoot';
-import { ValueObject } from '../../../../shared/domain/building-blocks/ValueObject';
 
 interface OrderProps {
   customerId: string;
@@ -173,8 +175,9 @@ interface OrderProps {
 
 export class Order extends AggregateRoot<OrderProps> {
   constructor(props: OrderProps, id?: string) {
-    // Enforce business rules
-    if (props.price < 0) throw new Error('Price cannot be negative');
+    if (props.price < 0) {
+      throw new Error('Price cannot be negative');
+    }
     super(props, id);
   }
 
@@ -189,8 +192,8 @@ export class Order extends AggregateRoot<OrderProps> {
 }
 ```
 
-### B. Infrastructure Mapper Example
-`src/modules/orders/infrastructure/persistence/OrderMapper.ts`
+### B. Infrastructure Mapper
+`src/modules/orders/infrastructure/adapters/mappers/OrderMapper.ts`
 ```typescript
 import { Order as PrismaOrder } from '@prisma/client';
 import { Order } from '../../domain/entities/Order';
@@ -207,7 +210,7 @@ export class OrderMapper {
     );
   }
 
-  static toPersistence(domain: Order) {
+  static toPersistence(domain: Order): Omit<PrismaOrder, 'createdAt' | 'updatedAt'> {
     return {
       id: domain.id,
       customerId: domain.customerId,
@@ -222,9 +225,15 @@ export class OrderMapper {
 
 ## 5. Dependency Injection without Framework Leakage
 
-Use cases must not contain `@Injectable()` or `@Inject()`. They receive ports in their constructors and are wired in the NestJS Module.
+Use cases must be pure TypeScript classes without `@Injectable()` or `@Inject()` decorators. They receive repositories (ports) via constructor injection. Wiring is handled at the NestJS Module level using token-based injection.
 
-### A. Core Use Case
+### A. Dedicated DI Tokens
+`src/modules/orders/domain/ports/tokens.ts`
+```typescript
+export const ORDER_REPOSITORY = Symbol('ORDER_REPOSITORY');
+```
+
+### B. Use Case
 `src/modules/orders/application/use-cases/CreateOrderUseCase.ts`
 ```typescript
 import { Order } from '../../domain/entities/Order';
@@ -241,29 +250,82 @@ export class CreateOrderUseCase {
 }
 ```
 
-### B. Module Composition Root
+### C. NestJS Module configuration
 `src/modules/orders/orders.module.ts`
 ```typescript
 import { Module } from '@nestjs/common';
 import { CreateOrderUseCase } from './application/use-cases/CreateOrderUseCase';
 import { OrderController } from './presentation/controllers/OrderController';
-import { PrismaOrderRepository } from './infrastructure/persistence/PrismaOrderRepository';
-
-export const ORDER_REPOSITORY_TOKEN = Symbol('ORDER_REPOSITORY');
+import { PrismaOrderRepository } from './infrastructure/adapters/repository/PrismaOrderRepository';
+import { ORDER_REPOSITORY } from './domain/ports/tokens';
 
 @Module({
   controllers: [OrderController],
   providers: [
     {
-      provide: ORDER_REPOSITORY_TOKEN,
+      provide: ORDER_REPOSITORY,
       useClass: PrismaOrderRepository,
     },
     {
       provide: CreateOrderUseCase,
       useFactory: (repo) => new CreateOrderUseCase(repo),
-      inject: [ORDER_REPOSITORY_TOKEN],
+      inject: [ORDER_REPOSITORY],
     },
   ],
 })
 export class OrdersModule {}
+```
+
+---
+
+## 6. Presentation Exception Mapping
+
+To prevent leaking raw database errors or framework-specific messages to consumers, catch domain errors and map them to appropriate HTTP/gRPC statuses using NestJS Exception Filters in `presentation/filters/`.
+
+### A. Exception Filter
+`src/modules/orders/presentation/filters/OrderExceptionFilter.ts`
+```typescript
+import { ExceptionFilter, Catch, ArgumentsHost, HttpStatus } from '@nestjs/common';
+import { Response } from 'express';
+
+@Catch(Error)
+export class OrderExceptionFilter implements ExceptionFilter {
+  catch(exception: Error, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+
+    // Map specific business validation/logic errors to corresponding HTTP Status Codes
+    let status = HttpStatus.BAD_REQUEST;
+    if (exception.message.includes('not found')) {
+      status = HttpStatus.NOT_FOUND;
+    }
+
+    response.status(status).json({
+      statusCode: status,
+      message: exception.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+```
+
+### B. Controller Integration
+`src/modules/orders/presentation/controllers/OrderController.ts`
+```typescript
+import { Controller, Post, Body, UseFilters } from '@nestjs/common';
+import { CreateOrderUseCase } from '../../application/use-cases/CreateOrderUseCase';
+import { CreateOrderDto } from '../dtos/CreateOrderDto';
+import { OrderExceptionFilter } from '../filters/OrderExceptionFilter';
+
+@Controller('orders')
+@UseFilters(OrderExceptionFilter)
+export class OrderController {
+  constructor(private readonly createOrderUseCase: CreateOrderUseCase) {}
+
+  @Post()
+  async create(@Body() dto: CreateOrderDto) {
+    const id = await this.createOrderUseCase.execute(dto.customerId, dto.price);
+    return { id };
+  }
+}
 ```
